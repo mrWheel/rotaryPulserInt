@@ -2,6 +2,7 @@
 //====================================================================
 void initOLED()
 {
+#ifdef _HAS_OLED
   //--- initialize the library
   u8g2.begin();
 
@@ -14,6 +15,7 @@ void initOLED()
   u8g2.drawStr(2, 60, "DEBUG Set 0-1");
   
   u8g2.sendBuffer();          // transfer internal memory to the display
+#endif
 
 } // initOLED()
 
@@ -21,11 +23,13 @@ void initOLED()
 //====================================================================
 void debugOLED()
 {
+#ifdef _HAS_OLED
   u8g2.clearBuffer();         // clear the internal memory 
   u8g2.setCursor(64, 32);
   u8g2.setFont(u8g2_font_open_iconic_thing_6x_t);
   u8g2.print(char(77));       // pot
   u8g2.sendBuffer();          // transfer internal memory to the display
+#endif
 
 } // debugOLED()
 
@@ -33,11 +37,11 @@ void debugOLED()
 //====================================================================
 void updateOLED()
 {
+#ifdef _HAS_OLED
   //--- display frequency on OLED display
   //--- make use of:
   //---  > 'frequency'
   //---  > 'potValue'
-  //---  > 'pulseDuration'
   //--- You really don't need anything else
   u8g2.clearBuffer();          // clear the internal memory;
   u8g2.setCursor(50, 15);
@@ -59,5 +63,6 @@ void updateOLED()
   u8g2.setFont(u8g2_font_open_iconic_arrow_2x_t);
   u8g2.print(char(87)); // pot
   u8g2.sendBuffer();          // transfer internal memory to the display
+#endif
 
 } // updateDisplay()

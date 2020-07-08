@@ -40,22 +40,23 @@
 #define pinA    8     // PB0
 #define pinB    9     // PB1
 #define pinPot  A0    // first analog pin
-#define pinSDA  21
-#define pinSCL  22
 
-#include <Wire.h>  
-#include <U8g2lib.h>
+// #define _HAS_OLED     // activate if you want to use an OLED screen
+#define HARDWARE_I2C  // defines: HW I2C else software emulation I2C
 
-#define HARDWARE_I2C
+#ifdef _HAS_OLED
+  #include <Wire.h>  
+  #include <U8g2lib.h>
 
-#ifdef HARDWARE_I2C
-  #define pinSDA  21
-  #define pinSCL  22
-  U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, pinSCL, pinSDA, U8X8_PIN_NONE);   // hardware I2C
-#else // software I2C
-  #define pinSDA  17
-  #define pinSCL  16
-  U8G2_SSD1106_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, pinSCL, /pinSDA, U8X8_PIN_NONE);  // pure SW emulated I2C
+  #ifdef HARDWARE_I2C
+    #define pinSDA  21
+    #define pinSCL  22
+    U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, pinSCL, pinSDA, U8X8_PIN_NONE);   // hardware I2C
+  #else // software I2C
+    #define pinSDA  17
+    #define pinSCL  16
+    U8G2_SSD1106_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, pinSCL, /pinSDA, U8X8_PIN_NONE);  // pure SW emulated I2C
+  #endif
 #endif
 
 uint32_t  frequency;

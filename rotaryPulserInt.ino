@@ -36,6 +36,7 @@
 #define SET_LOW(_port, _pin)    ((_port) &= ~_BV(_pin))
 #define SET_HIGH(_port, _pin)   ((_port) |= _BV(_pin))
 
+#define _DEBUG  0     // 1=print, 0=no print
 
 #define pinA    8     // PB0
 #define pinB    9     // PB1
@@ -59,24 +60,26 @@
   #endif
 #endif
 
-uint32_t  frequency;
+float     frequency;
 uint8_t   timerValue;
 int       prevPotValue = 0, potValue = 0;
-uint32_t  timerDuration;
+uint32_t  timerDuration, showPulseTimer;
 uint8_t   steps;
 
-volatile  int8_t  togglePin = 0;
-
+volatile  int8_t    togglePin = 0;
+volatile  uint32_t  startPulse;
+volatile  uint32_t  pulseMicroSeconds;
 
 //====================================================================
-ISR(TIMER2_COMPA_vect)  //-- timer0 interrupt 8kHz toggles pin 8
+ISR(TIMER2_COMPA_vect)  //-- timer2 interrupt toggles pin D8 and D9
 {
-  //--- generates pulse wave of frequency 2kHz/2 = 1kHz 
-  //--- (takes two cycles for full wave- toggle high then toggle low)
+  //--- (takes four cycles for full A and B wave- toggle high then toggle low)
   switch (togglePin)
   {
     case 0: //digitalWrite(pinA, HIGH);
             SET_HIGH(PORTB, 0); // PB0 = D8
+            pulseMicroSeconds = (pulseMicroSeconds + (micros() - startPulse)) /2;
+            startPulse        = micros();
             togglePin++;
             break;
     case 1: //digitalWrite(pinA, HIGH);
@@ -101,15 +104,16 @@ void readPotmeter()
 {
   potValue = analogRead(pinPot);
   //--- only real changes are processed
-  if (potValue > (prevPotValue * 1.05) || potValue < (prevPotValue * 0.95))
+  if (potValue > (prevPotValue * 1.08) || potValue < (prevPotValue * 0.92))
   {
-    Serial.print(F("potValue:\t"));
-    Serial.print(potValue);
-    frequency = map(potValue, 0, 1023, 16, 25000);
-    Serial.print(F(" \tfreq:\t"));
-    Serial.print(frequency);
+    if (_DEBUG) Serial.print(F("potValue:\t"));
+    if (_DEBUG) Serial.print(potValue);
     prevPotValue = potValue;
     updateTimer2();
+    if (_DEBUG) Serial.print(F(" \tpulseTime: "));
+    if (_DEBUG) Serial.print(pulseMicroSeconds); 
+    frequency = 1000000 / pulseMicroSeconds;
+    if (_DEBUG) Serial.print(F(" \tFreq.: ")); if (_DEBUG) Serial.println(frequency);
     updateOLED();
   }
   
@@ -119,33 +123,36 @@ void readPotmeter()
 //====================================================================
 void updateTimer2()
 {
-  if (frequency >= 2000)
+  //if (frequency >= 2000)
+  if (potValue >= 80)
   {
-    Serial.print(F("\tfreq. >= 2000"));
+    if (_DEBUG) Serial.print(F("\tpotValue. >= 80"));
     // steps  19 -> 25 kHz
     // steps 255 -> 1.9 Hz
-    steps = map(frequency, 1900, 25000, 255, 19);
-    Serial.print(F("\tsteps:\t")); Serial.println(steps);
+    //steps = map(frequency, 1900, 25000, 255, 19);
+    steps = map(potValue, 80, 1023, 255, 19);
+    if (_DEBUG) Serial.print(F("\tsteps:\t")); if (_DEBUG) Serial.println(steps);
     //--- prescaler 1/8
     setupTimer2(steps,  (1 << CS21)); 
   }
-  else if (frequency >= 500)
+  //else if (frequency >= 500)
+  else if (potValue >= 25)
   {
-    Serial.print("\tfreq. >= 500");
+    if (_DEBUG) Serial.print("\tpotValue >= 25");
     //-- 14 -> 2000 Hz 
     //-- 57 ->  500 Hz 
-    steps = map(frequency, 500, 2000, 57, 14);
-    Serial.print(F("\tsteps:\t")); Serial.println(steps);
+    steps = map(potValue, 25, 80, 57, 14);
+    if (_DEBUG) Serial.print(F("\tsteps:\t")); if (_DEBUG) Serial.println(steps);
     //--- prescaler 1/128
     setupTimer2(steps, (1 << CS22) | (1 << CS20));  
   }
   else
   {
-    Serial.print(F("\tfreq. < 500"));
+    if (_DEBUG) Serial.print(F("\tpotValue < 25"));
     //--   7  -> 490 Hz 
     //-- 250 ->   16 Hz 
-    steps = map(frequency, 16, 500, 250, 7);
-    Serial.print(F("\tsteps:\t")); Serial.println(steps);
+    steps = map(potValue, 0, 25, 250, 7);
+    if (_DEBUG) Serial.print(F("\tsteps:\t")); if (_DEBUG) Serial.println(steps);
     //--- prescaler 1/1024 
     setupTimer2(steps, (1 << CS22) | (1 << CS21) | (1 << CS20));       
   }
@@ -225,7 +232,7 @@ void setup()
   prevPotValue = analogRead(pinPot) + 100;
   readPotmeter();
 
-  Serial.println(F("\nAnd then it begins ...\n"));
+  if (_DEBUG) Serial.println(F("\nAnd then it begins ...\n"));
   
 } // setup()
 
@@ -233,34 +240,25 @@ void setup()
 //====================================================================
 void loop()
 {
-  if (Serial.available())
-  {
-    char x = Serial.read();
-    if (x == '\n')
-    {
-      switch(frequency) {
-        case 50:    frequency = 400;    break;
-        case 400:   frequency = 500;    break;
-        case 500:   frequency = 600;    break;
-        case 600:   frequency = 1900;   break;
-        case 1900:  frequency = 2000;   break;
-        case 2000:  frequency = 2100;   break;
-        case 2100:  frequency = 10000;  break;
-        case 10000: frequency = 25000;  break;
-        case 25000: frequency = 50;     break;
-        default:    frequency = 50;
-      }
-      Serial.print(F(" \tfreq:\t"));
-      Serial.print(frequency);
-      timerDuration = (1000000 / frequency) / 4;
-      Serial.print(F(" \ttimerDuration:\t"));
-      Serial.print(timerDuration);
-      updateTimer2();
-      updateOLED();
-    }
-  }
-
   readPotmeter();
+
+  if (millis() > showPulseTimer)
+  {
+    showPulseTimer = millis() + 1000;
+    frequency = 1000000 / pulseMicroSeconds;
+    if (_DEBUG) Serial.print(F("potValue: "));      if (_DEBUG) Serial.print(potValue);
+    if (_DEBUG) Serial.print(F(" \tpulseTime: "));  if (_DEBUG) Serial.print(pulseMicroSeconds);
+    if (_DEBUG) Serial.print(F(" \tFreq.: "));
+    if (frequency > 1000) 
+    {
+      if (_DEBUG) Serial.print(frequency / 1000 );
+      if (_DEBUG) Serial.print(F(" k"));
+    }
+    else if (_DEBUG) Serial.print(frequency);
+    if (_DEBUG) Serial.println(F("Hz"));
+    
+    updateOLED();
+  }
 
 }
 

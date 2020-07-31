@@ -12,5 +12,5 @@ https://github.com/fdebrabander/Arduino-LiquidCrystal-I2C-library
 
 none
 
-<center><img src="../images/4x4-button-keypad.png"</img></center>
+<center><img src="./images/4x4-button-keypad.png"</img></center>
 

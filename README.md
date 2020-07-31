@@ -1,17 +1,16 @@
 # rotaryPulserInt
-rotaryPulser based on ATmega328 using timer interrupt
+rotaryPulser based on ATmega328 using Timer1 interrupt
+
+uses:
+
+<pre>
+https://github.com/Chris--A/Keypad
+https://github.com/fdebrabander/Arduino-LiquidCrystal-I2C-library
+</pre>
 
 ## Optinal compile options
 
-If you want to connect an OLED screen to the rotaryPulser
-you need to 
-<pre>#define _HAS_OLED</pre>
+none
 
-If you don't have a OLED screen place two slashes in front of the define
-<pre>// #define _HAS_OLED</pre>
+<center><img src="../images/4x4-button-keypad.png"</img></center>
 
-If you want to use HW I2C you also has to 
-<pre>#define HARDWARE_I2C</pre>
-
-If you want to use Software I2C emulation place two slashes before the define
-<pre>// #define HARDWARE_I2C</pre>

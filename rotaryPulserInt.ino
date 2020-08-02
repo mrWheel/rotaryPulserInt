@@ -2,7 +2,11 @@
 ***************************************************************************  
 **  rotaryPulserInt     
 **
-**  Versie datum: 31-07-2020
+**  Versie datum: 01-08-2020 
+*  
+*   This program is part of a "PLC test cabinet" project by JDJ Electronics.
+*   The specification and the hardware design are from Jelmer de Jong.
+*   Software design by Willem Aandewiel
 **  
 **  This program is based on the Timer1 interrupt handeling (COMPA)
 **  to generate interupts.
@@ -11,6 +15,15 @@
 **  
 **  Frequency can either be keyed in from a 4x4 keypad
 **  or calculated from the position of a potmeter.
+**  
+**  01-08-2020  Added 3 status leds (potmeter active, sweep mode, pulse output)
+**              Added code to set sweep-time
+**  31-07-2020  Added Sweep mode
+**  10-07-2020  Advanced calculation of Timer1 values from requested frequency
+**  09-07-2020  Changed from Timer2 to Timer1
+**  08-07-2020  Added keypad input and LCD display
+**  07-07-2020  Calculate timer2 values from input (not reliable)
+**  06-07-2020  Initial release using Timer2 and potmeter reading
 **
 **  Copyright (c) 2020 Willem 
 **
@@ -20,29 +33,32 @@
 * Pulsgever
 * 
 *      +---+   +---+   +--
-*    A |   |   |   |   |        (11)
+*    A |   |   |   |   |        8 (11)
 *    --+   +---+   +---+
 *        +---+   +---+   +--
-*      B |   |   |   |   |      (12)
+*      B |   |   |   |   |      9 (12)
 *     ---+   +---+   +---+
 * 
 * Connections:
 * 
 *   KeyPad
-*  ---------+               Arduino
-*  top view |              --------- 
-*           +-x nc         |       |
-* [7] [*]   +------------> 2       0 ----> Tx
-*           +------------> 3       1 <---- Rx 
-* [8] [0]   +------------> 4       |
-*           +------------> 5       4 <---> SDA
-* [9] [#]   +------------> 6       5 <---> SCL
-*           +------------> 7       |
-* [C] [D]   +------------> 8       11 ---> Pulse A
-*           +------------> 9       12 ---> Pulse B
-*           +-x nc         |       |
-*           |              |       A0 <--- Potmeter loper
-*  ---------+              ---------
+*  ---------+                 Arduino
+*  top view |              +------------+      (pins for JDJ PCB)
+*           +-x nc         |            |
+* [7] [*]   +------------> 2            0 ----> Tx
+*           +------------> 3            1 <---- Rx 
+* [8] [0]   +------------> 4            |
+*           +------------> 5            4 <---> SDA
+* [9] [#]   +------------> 6            5 <---> SCL
+*           +------------> 7            |
+* [C] [D]   +------------> 8 (11)   (8) 11 ----> Pulse A
+*           +------------> 9 (12)   (9) 12 ----> Pulse B
+*           +-x nc         |            |
+*           |              |            A0 <--- Potmeter loper
+*  ---------+              |            A1 ---> pulse out LED
+*                          |            A2 ---> potmeter Active LED
+*                          |            A3 ---> Sweep Mode Active LED
+*                          +------------+
 * 
 * Connect lineair potmeter 10K between 5v, GND and A0
 * 
@@ -55,28 +71,45 @@
 *             +-+
 *              |
 *   GND -------+ 
-
+*
+*   set frequency     : [0]-[9] .. [0]-[9] + [A]
+*   set sweep         : from active frequency to new frequency and back in 10 seconds
+*   activate sweep    : [0]-[9] .. [0]-[9] + [A] - [0]-[9] .. [0]-[9] + [B]
+*   set sweep time    : [0]-[9] + [D]
+*   activate potmeter : [*] + [A]
+*   clear input       : [C] (and stop pulse)
 *
 */
 
-#define SET(a,b)      ((a) |= _BV(b))
-#define CLEAR(a, b)   ((a) &= ~_BV(b))
+//#define JDJEPCB       // this PCB has "D8 & D9 on D11 & D12" and "D11 & D12 on D8 & D9"
+
+#define SETBIT(a,b)             ((a) |= _BV(b))
+#define CLEARBIT(a, b)          ((a) &= ~_BV(b))
 #define SET_LOW(_port, _pin)    ((_port) &= ~_BV(_pin))
 #define SET_HIGH(_port, _pin)   ((_port) |= _BV(_pin))
 
-#define pinA    11    // PB3
-#define pinB    12    // PB4
-#define pinPot  A0    // PC0
+#ifdef JDJEPCB
+  //--- JDJ-Electronics board
+  #define pinA        8     // PB0    
+  #define pinAbit     0     // PB0
+  #define pinB        9     // PB1   
+  #define pinBbit     1     // PB1
+#else
+  //--- normal board
+  #define pinA       11     // PB3   
+  #define pinAbit     3     // PB3
+  #define pinB       12     // PB4   
+  #define pinBbit     4     // PB5
+#endif
+
+#define POTMETER      A0     // PC0
+#define LED_PULSE_ON  A1
+#define LED_POTMETER  A2
+#define LED_SWEEPMODE A3
 
 #define _CLOCK    16000000
 #define _MAXFREQCHAR    20
 #define _HYSTERESIS      5
-
-#include <Wire.h>  
-#include <LiquidCrystal_I2C.h>
-
-LiquidCrystal_I2C lcd(0x27,16,2); 
-
 
 #include <Keypad.h>
 
@@ -91,43 +124,51 @@ char hexaKeys[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
-byte rowPins[ROWS] = {5, 4, 3, 2}; 
-byte colPins[COLS] = {9, 8, 7, 6}; 
+#ifdef JDJEPCB
+  byte rowPins[ROWS] = { 5,  4, 3, 2}; 
+  byte colPins[COLS] = {12, 11, 7, 6}; 
+#else
+  byte rowPins[ROWS] = { 5, 4, 3, 2}; 
+  byte colPins[COLS] = { 9, 8, 7, 6}; 
+#endif
 
-Keypad customKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS); 
+Keypad inputKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS); 
 
-char      customKey;
-char      newFrequencyChar[_MAXFREQCHAR];
-int32_t   newFrequency, ledBuiltinTimer;
+char      inputKey;
+char      newInputChar[_MAXFREQCHAR];
+int32_t   newFrequency, startSweepFreq, endSweepFreq, diffFrequency;
+float     stepFrequency;
+uint32_t  sweepTimer, sweepTime = 4000;
+uint32_t  ledBuiltinTimer;
 uint8_t   freqKeyPos = 0;
-uint16_t  potValue, newPotValue;
-bool      potmeterActive = false;
+uint16_t  potValue, potSaved, newPotValue;
+bool      sweepModeActive, potmeterActive;
 
 volatile int8_t  togglePin = 0;
 volatile int32_t frequency;
 
 
 //====================================================================
-ISR(TIMER1_COMPA_vect)  //-- timer1 interrupt toggles pin 11 & 12
+ISR(TIMER1_COMPA_vect)  //-- timer1 interrupt toggles pin 8 & 9 (should be 11 & 12)
 {
-  //--- generates pulse wave of frequency 2kHz/2 = 1kHz 
+  //--- generates pulse wave 
   //--- (takes two cycles for full wave- toggle high then toggle low)
   switch (togglePin)
   {
     case 0: //digitalWrite(pinA, HIGH);
-            SET_HIGH(PORTB, 3); // PB3 = 11
+            SET_HIGH(PORTB, pinAbit); 
             togglePin++;
             break;
     case 1: //digitalWrite(pinA, HIGH);
-            SET_HIGH(PORTB, 4); // PB4 = 12
+            SET_HIGH(PORTB, pinBbit); 
             togglePin++;
             break;
     case 2: //digitalWrite(pinA, LOW);
-            SET_LOW(PORTB, 3);  // PP3 = 11
+            SET_LOW(PORTB, pinAbit);  
             togglePin++;
             break;
     case 3: //digitalWrite(pinB, LOW);
-            SET_LOW(PORTB, 4);  // PB4 = 12
+            SET_LOW(PORTB, pinBbit); 
             togglePin = 0;
             break;
   }
@@ -136,184 +177,30 @@ ISR(TIMER1_COMPA_vect)  //-- timer1 interrupt toggles pin 11 & 12
 
 
 //====================================================================
-void initLCD()
-{
-  //--- initialize the library
-  lcd.setCursor(0,0);
-  lcd.print("JDengineers");
-  lcd.setCursor(0,1);
-  lcd.print("Encoder Pulse");
-  
-} // initOLED()
-
-//====================================================================
-void updateLCD()
-{
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("FREQUENCY: "); 
-  lcd.print(frequency);
-  lcd.setCursor(0,1);
-  lcd.print("NEW FREQ.: "); 
-  lcd.print(newFrequencyChar);
-  
-  Serial.print(F("FREQUENCY: ")); Serial.println(frequency);
-  Serial.print(F("NEW FREQ.: ")); Serial.println(newFrequencyChar);
-  
-} // updateDisplay()
-
-
-//====================================================================
-void easterLCD()
-{
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print(" (c) Willem "); 
-  lcd.setCursor(0,1);
-  lcd.print("Aandewiel"); 
-  Serial.println(F("(c) Willem Aandewiel"));
-  
-} // updateDisplay()
-
-
-//====================================================================
 void uitleg()
 {
   Serial.println(F("\r\nEnter frequency with [0]-[9] key's (in Hz)"));
   Serial.println(F("Enter [A] to accept new frequency"));
+  Serial.println(F("Enter [B] accept second frequency for sweep"));
   Serial.println(F("Enter [C] to clear input"));
+  Serial.println(F("Enter [D] to set sweep time (3-20 seconds)"));
   Serial.println(F("Enter [*] + [A] for potmeter reading"));
   
 } // uitleg()
 
 
 //====================================================================
-int32_t calculateTimer1(int32_t freqAsked, uint8_t &newTCCR1B)
-{
-  int32_t compareMatch;
-
-  //-Serial.print(F("freqAsked[")); Serial.print(freqAsked); Serial.println(F("]"));
-  //--- we need 4 interrupts for 1 cycle of A and B (4 state changes)
-  freqAsked *= 4; 
-  
-  compareMatch = _CLOCK / (freqAsked*1) - 1;
-  //-Serial.print(F("preScale 0 ->compareMatch is [")); Serial.print(compareMatch);
-  if (compareMatch < 65536)
-  {
-    //-Serial.println(F("] < 65536 --> OK!"));
-    //-Serial.flush();
-    //--- Set CS12, CS11 and CS10 bits for 1 prescaler
-    newTCCR1B |= (0 << CS12) | (0 << CS11) | (1 << CS10);
-    return compareMatch;
-  }
-  //-Serial.println();
-
-  compareMatch = _CLOCK / (freqAsked*8) - 1;
-  //-Serial.print(F("preScale 8 ->compareMatch is [")); Serial.print(compareMatch);
-  if (compareMatch < 65536)
-  {
-    //-Serial.println(F("] < 65536 --> OK!"));
-    //-Serial.flush();
-    //--- Set CS12, CS11 and CS10 bits for 8 prescaler
-    newTCCR1B |= (0 << CS12) | (1 << CS11) | (0 << CS10);
-    return compareMatch;
-  }
-  //-Serial.println();
-
-  compareMatch = _CLOCK / (freqAsked*64) - 1;
-  //-Serial.print(F("preScale 64 -> compareMatch is [")); Serial.print(compareMatch);
-  if (compareMatch < 65536)
-  {
-    //-Serial.println(F("] < 65536 --> OK!"));
-    //-Serial.flush();
-    //--- Set CS12, CS11 and CS10 bits for 64 prescaler
-    newTCCR1B |= (0 << CS12) | (1 << CS11) | (1 << CS10);
-    return compareMatch;
-  }
-  //-Serial.println();
-
-  compareMatch = _CLOCK / (freqAsked*256) - 1;
-  //-Serial.print(F("preScale 65536 ->compareMatch is [")); Serial.print(compareMatch);
-  if (compareMatch < 65536)
-  {
-    //-Serial.println(F("] < 65536 --> OK!"));
-    //-Serial.flush();
-    //--- Set CS12, CS11 and CS10 bits for 256 prescaler
-    newTCCR1B |= (1 << CS12) | (0 << CS11) | (0 << CS10);
-    return compareMatch;
-  }
-  //-Serial.println();
-
-  //-Serial.println(F("] >= 65536 --> ERROR!"));
-  //-Serial.flush();
-
-} // calculateTimer1()
-
-
-//====================================================================
-void setupTimer1(int32_t newFrequency)
-{
-  uint8_t newTCCR1B = 0;
-  
-  cli(); //--- stop interrupts
-
-  //--- clear Timer1 interrupt values
-  TCCR1A = 0; // set entire TCCR1A register to 0
-  TCCR1B = 0; // same for TCCR1B
-  TCNT1  = 0; // initialize counter value to 0
-
-  //---   calculate number of interrupts
-  OCR1A = calculateTimer1(newFrequency, newTCCR1B);
-
-  //--------- this is an example for a 1kHz interrupt --------------
-  //-- set compare match register for 1000 Hz increments
-  // OCR1A = 15999; // = 16000000 / (1 * 1000) - 1 (must be <65536)
-  //-- turn on CTC mode
-  //  TCCR1B |= (1 << WGM12);
-  //-- Set CS12, CS11 and CS10 bits for 1 prescaler
-  //  TCCR1B |= (0 << CS12) | (0 << CS11) | (1 << CS10);
-  //-- enable timer compare interrupt
-  //  TIMSK1 |= (1 << OCIE1A);
-  //------------------ end of example ------------------------------
-  
-  //--- turn on CTC mode
-  TCCR1B |= (1 << WGM12);
-  
-  //--- Set  prescaler -------------------------
-  //--- | CS12 | CS11 | CS10 | Opmerking
-  //--- |------+------+------+------------------
-  //--- |  0   |  0   |  0   | no Clock!!!
-  //--- |  0   |  0   |  1   | No Prescaler
-  //--- |  0   |  1   |  0   | 1/8 Prescaler
-  //--- |  0   |  1   |  1   | 1/32 Prescaler
-  //--- |  1   |  0   |  0   | 1/64 Prescaler
-  //--- |  1   |  0   |  1   | 1/128 Prescaler
-  //--- |  1   |  1   |  0   | 1/256 Prescaler
-  //--- |  1   |  1   |  1   | 1/1024 Prescaler
-  //--- |------+------+------+------------------
-
-  //--- add prescaler information from calculateTimer1()
-  TCCR1B |= newTCCR1B;
-
-  //--- enable timer compare interrupt from calculateTimer1()
-  TIMSK1 |= (1 << OCIE1A);
-
-  //--- update actual frequency
-  frequency = newFrequency; 
-
-  sei();  //--- allow interrupts
-
-} // setupTimer1()
-
-
-//====================================================================
 void readPotmeter()
 {
-  volatile uint16_t potSav;
+  if (!potmeterActive) 
+  {
+    digitalWrite(LED_POTMETER, LOW);
+    return;
+  }
   
-  if (!potmeterActive)  return;
+  digitalWrite(LED_POTMETER, HIGH);
   
-  int16_t newPotValue = analogRead(pinPot);
+  int16_t newPotValue = analogRead(POTMETER);
   //--- only changes within hesteresis are processed
   if (newPotValue > (potValue + _HYSTERESIS))       potValue = newPotValue;  
   else if (newPotValue < (potValue - _HYSTERESIS))  potValue = newPotValue;  
@@ -323,12 +210,12 @@ void readPotmeter()
   if (newFrequency < 10)      newFrequency =    10;
   if (newFrequency > 25000)   newFrequency = 25000;
   
-  if (potSav != potValue)
+  if (potSaved != potValue)
   {
     Serial.print(F("Potmeter frequency: ")); Serial.println(newFrequency);
     setupTimer1(newFrequency);
-    potSav = potValue;
-    sprintf(newFrequencyChar, "potMeter");
+    potSaved = potValue;
+    sprintf(newInputChar, "potMeter");
     updateLCD();
   }
 
@@ -336,29 +223,105 @@ void readPotmeter()
 
 
 //====================================================================
+void calculateSweep()
+{
+  diffFrequency = endSweepFreq - startSweepFreq;
+  Serial.print(F("diffFreq[")); Serial.print(diffFrequency*10.0);
+  Serial.print(F("] -> step[")); Serial.print((sweepTime / 10.0));
+  Serial.println(F("]"));
+  stepFrequency = (diffFrequency * 10.0) / (sweepTime / 10.0);  // steps
+  Serial.print(F("sweep from[")); Serial.print(startSweepFreq);
+  Serial.print(F("] Hz to[")); Serial.print(endSweepFreq);
+  Serial.print(F("] Hz step[")); Serial.print(stepFrequency);
+  Serial.println(F("]"));
+  if (stepFrequency < 2.0)
+  {
+    sprintf(newInputChar, "SWEEP ERROR");
+    digitalWrite(LED_SWEEPMODE, LOW);
+    sweepModeActive = false;
+  }
+  else 
+  {
+    sprintf(newInputChar, "SWEEPMODE");
+    digitalWrite(LED_SWEEPMODE, HIGH);
+  }
+  updateLCD();
+  
+} // calculateSweep()
+
+
+//====================================================================
+void sweep()
+{
+  static int8_t  stepDir = 1;
+  static uint32_t elapse = millis();
+  
+  if (!sweepModeActive) 
+  {
+    digitalWrite(LED_SWEEPMODE, LOW);
+    return;
+  }
+  
+  digitalWrite(LED_SWEEPMODE, HIGH);
+
+  if (millis() > sweepTimer)
+  {
+    newFrequency = frequency + (stepFrequency * stepDir);
+ 
+    sweepTimer = millis() + 100;
+    if (newFrequency <= startSweepFreq) 
+    {
+      sweepTimer = millis() + 500;
+      Serial.print("elapsed time Sweep ["); Serial.print((float)((millis() - elapse) / 1000.0)); Serial.println("] seconds");
+      newFrequency = startSweepFreq;
+      stepDir =  1;
+    }
+    else if (newFrequency >= endSweepFreq) 
+    {
+      sweepTimer = millis() + 500;
+      elapse = millis() - 505;  // beetje smokkelen ;-)
+      stepDir = -1;
+      newFrequency = endSweepFreq;
+    }
+    
+    setupTimer1(newFrequency);
+
+    //Serial.print(F("frequency[")); Serial.print(frequency);
+    //Serial.println(F("]"));
+
+  }
+  
+} // sweep()
+
+
+//====================================================================
 void setup()
 {
   Serial.begin(115200);
   while (!Serial) { /* wait */ }
-  
-  lcd.init();
-  lcd.backlight();
-  lcd.setBacklight(HIGH);
+
+  setupLCD();
   initLCD();
   
-  pinMode(pinA,        OUTPUT);
-  pinMode(pinB,        OUTPUT);
-  pinMode(pinPot,      INPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(pinA,          OUTPUT);
+  pinMode(pinB,          OUTPUT);
+  pinMode(POTMETER,      INPUT);
+  pinMode(LED_BUILTIN,   OUTPUT);
+  pinMode(LED_PULSE_ON,  OUTPUT);
+  pinMode(LED_POTMETER,  OUTPUT);
+  pinMode(LED_SWEEPMODE, OUTPUT);
 
-  sprintf(newFrequencyChar, "%5d", 1000);
+  sprintf(newInputChar, "%5d", 1000);
   newFrequency = 1000;
-
-  potValue = analogRead(pinPot);
+  
+  sweepModeActive = false;
+  potmeterActive  = false;
+  
+  potValue = analogRead(POTMETER);
   
   Serial.println(F("\nAnd then it begins ...\n"));
   
-  setupTimer1(newFrequency);
+  //setupTimer1(newFrequency);
 
   delay(1000);
 
@@ -372,15 +335,16 @@ void loop()
 {
 
   readPotmeter();
+  sweep();
   
-  customKey = customKeypad.getKey();
+  inputKey = inputKeypad.getKey();
     
   if (Serial.available())
   {
-    customKey = Serial.read();
+    inputKey = Serial.read();
   }
   
-  switch (customKey)
+  switch (inputKey)
   {
     case '0':
     case '1':
@@ -394,68 +358,125 @@ void loop()
     case '9':   potmeterActive = false;
                 if (freqKeyPos < _MAXFREQCHAR)
                 {
-                  newFrequencyChar[freqKeyPos++] = customKey;
-                  newFrequencyChar[freqKeyPos] = 0;
+                  newInputChar[freqKeyPos++] = inputKey;
+                  newInputChar[freqKeyPos] = 0;
                 }
                 updateLCD();
                 break;
                 
-    case 'A':   Serial.print(F("\r\nfreqKeyed in is [")); Serial.print(newFrequencyChar); Serial.println(F("]"));
+    case 'A':   Serial.print(F("\r\nfreqKeyed in is [")); Serial.print(newInputChar); Serial.println(F("]"));
                 Serial.flush();
                 if (freqKeyPos == 0)  break;
-                if (newFrequencyChar[0] == '*')  
+                if (newInputChar[0] == '*')  
                 {
                   potmeterActive = true;
+                  potSaved       = 0;
                   break;
                 }
                 potmeterActive = false;
-                newFrequency = atoi(newFrequencyChar);
+                newFrequency = atoi(newInputChar);
                 if (newFrequency < 10) 
                 {
                   newFrequency = 10;
-                  sprintf(newFrequencyChar, "%5d", newFrequency);
+                  sprintf(newInputChar, "< 10Hz");
                 }
                 if (newFrequency > 25000) 
                 {
                   newFrequency = 25000;
-                  sprintf(newFrequencyChar, "%5d", newFrequency);
+                  sprintf(newInputChar, "> 25kHz");
                 }
                 setupTimer1(newFrequency);
+                digitalWrite(LED_PULSE_ON, HIGH);
                 updateLCD();
                 freqKeyPos = 0;
-                newFrequencyChar[freqKeyPos] = 0;
+                newInputChar[freqKeyPos] = 0;
+                sweepModeActive = false;
+                uitleg();
+                break;
+                
+    case 'B':   Serial.println(F("sweep mode"));
+                sweepModeActive = true;
+                startSweepFreq  = frequency;
+                endSweepFreq    = atoi(newInputChar);
+                if (startSweepFreq < 10)  startSweepFreq = 10;
+                if (endSweepFreq < 10) 
+                {
+                  endSweepFreq = 10;
+                }
+                if (endSweepFreq > 25000) 
+                {
+                  endSweepFreq = 25000;
+                }
+                if (startSweepFreq == endSweepFreq) 
+                {
+                  sweepModeActive = false;
+                  digitalWrite(LED_SWEEPMODE, LOW);
+                  return;
+                }
+                if (startSweepFreq > endSweepFreq) 
+                {
+                  diffFrequency   = endSweepFreq;
+                  endSweepFreq    = startSweepFreq;
+                  startSweepFreq  = diffFrequency;
+                }
+                calculateSweep();
+                freqKeyPos = 0;
+                newInputChar[freqKeyPos] = 0;
                 uitleg();
                 break;
                 
     case 'C':   Serial.println(F("input cancelled"));
+                //--- disable timer compare interrupt
+                TIMSK1 = 0;
+                SET_LOW(PORTB, pinAbit);
+                SET_LOW(PORTB, pinBbit);
                 freqKeyPos = 0;
-                newFrequencyChar[freqKeyPos] = 0;
+                newInputChar[freqKeyPos] = 0;
+                updateLCD();
                 uitleg();
+                sweepModeActive = false;
+                digitalWrite(LED_PULSE_ON, LOW);
                 break;
 
     case '#':
-    case 'B':
-    case '*':   //Serial.print(customKey);
+    case '*':   //Serial.print(inputKey);
                 if (freqKeyPos < _MAXFREQCHAR)
                 {
-                  newFrequencyChar[freqKeyPos++] = customKey;
-                  newFrequencyChar[freqKeyPos] = 0;
+                  newInputChar[freqKeyPos++] = inputKey;
+                  newInputChar[freqKeyPos] = 0;
                 }
                 updateLCD();
+                sweepModeActive = false;
                 break;
 
-    case 'D':   if (strcmp(newFrequencyChar, "*0#") == 0)
+    case 'D':   if (strcmp(newInputChar, "*0#") == 0)
                 {
                   easterLCD();
-                  newFrequency = 1000;
-                  setupTimer1(newFrequency);
+                  //newFrequency = 1000;
+                  //setupTimer1(newFrequency);
                   freqKeyPos = 0;
-                  newFrequencyChar[freqKeyPos] = 0;
+                  newInputChar[freqKeyPos] = 0;
+                  sweepModeActive = false;
+                  digitalWrite(LED_SWEEPMODE, LOW);
                   break;
                 }
+                Serial.print(F("sweeptime ["));
+                sweepTime    = atoi(newInputChar) * 1000; // in ms
+                if (sweepTime <  3000)  sweepTime =  3000;
+                if (sweepTime > 20000)  sweepTime = 20000;
+                Serial.print(sweepTime);
+                Serial.println(F("] milliseconds"));
+                sweepTime -= 1000;  // 2x 500ms stop at start and end
+                calculateSweep();
+                sprintf(newInputChar, "Sweep %d sec.", ((sweepTime+1000) / 1000));
+                updateLCD();
+                freqKeyPos = 0;
+                newInputChar[freqKeyPos] = 0;
+                newFrequency = startSweepFreq;
                 uitleg();
                 break;
-  } // switch
+                
+  } // switch(key)
 
   if (millis() > ledBuiltinTimer)
   {
